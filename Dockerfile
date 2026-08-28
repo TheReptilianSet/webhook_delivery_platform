@@ -18,7 +18,14 @@ FROM python:3.13-slim AS runtime
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
-RUN groupadd --system webhook && useradd --system --gid webhook --home-dir /app webhook
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/local/lib/python3.13/site-packages/pip \
+        /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13 \
+    && groupadd --system webhook \
+    && useradd --system --gid webhook --home-dir /app webhook
 WORKDIR /app
 COPY --from=builder --chown=webhook:webhook /app/.venv /app/.venv
 COPY --chown=webhook:webhook src ./src

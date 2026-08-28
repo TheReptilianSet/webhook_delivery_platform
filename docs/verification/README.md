@@ -13,11 +13,13 @@ This directory records commands, environment details, measured results, and devi
 - Migration round trip: passed on a clean disposable database.
 - Docker image and local Compose acceptance flow: passed.
 - Python dependency vulnerability scan: passed; no known vulnerabilities.
-- Local container vulnerability scan: not run because Docker Scout required external authentication;
-  the pinned Trivy filesystem/image gate is configured in CI but has not run in this workspace.
+- Local Trivy 0.70.0 image scan: passed with no HIGH or CRITICAL vulnerabilities and no detected
+  secrets after the runtime image security update. The corresponding CI rerun is pending.
 - Load and failure hypotheses: pending.
 
 See [2026-08-27 initial implementation verification](2026-08-27-initial-implementation.md) for
 commands and limitations.
 The later [fix phase verification](2026-08-27-fix-phase.md) records the specification-gap fixes and
 their rerun results.
+The [container security verification](2026-08-28-container-security.md) records the CI findings,
+runtime changes, and the reproduced Trivy result.
