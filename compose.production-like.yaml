@@ -1,0 +1,11 @@
+# Local topology check with infrastructure ports kept inside the Compose network.
+# This is not a production deployment profile and deliberately keeps development credentials.
+services:
+  postgres:
+    ports: !reset []
+
+  rabbitmq:
+    ports: !reset []
+
+  test-receiver:
+    ports: !reset []

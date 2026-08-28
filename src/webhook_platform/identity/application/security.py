@@ -1,0 +1,16 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+
+class IdentitySecurity(Protocol):
+    def hash_password(self, password: str) -> str: ...
+
+    def verify_password(self, password: str, encoded: str) -> bool: ...
+
+    def create_access_token(self, user_id: str) -> tuple[str, datetime]: ...
+
+    def new_refresh_token(self) -> str: ...
+
+    def token_hash(self, token: str) -> str: ...

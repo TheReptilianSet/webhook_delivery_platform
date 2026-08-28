@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+        with:
+          version: "0.11.24"
+      - run: uv sync --all-groups --frozen
+      - run: uv lock --check
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy src tests
+
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      WEBHOOK_PLATFORM_TEST_DATABASE_URL: postgresql+asyncpg://webhook:webhook@localhost:5432/webhook
+      WEBHOOK_PLATFORM_TEST_BROKER_URL: amqp://webhook:webhook@localhost:5672//
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: webhook
+          POSTGRES_USER: webhook
+          POSTGRES_PASSWORD: webhook
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U webhook -d webhook"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      rabbitmq:
+        image: rabbitmq:4-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: webhook
+          RABBITMQ_DEFAULT_PASS: webhook
+        ports: ["5672:5672"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+        with:
+          version: "0.11.24"
+      - run: uv sync --all-groups --frozen
+      - run: uv run alembic upgrade head
+      - run: uv run pytest -m "not e2e" --strict-markers -q
+      - run: uv run alembic downgrade base
+      - run: uv run alembic upgrade head
+
+  build:
+    needs: [quality, tests, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: docker build --check .
+      - run: docker build -t webhook-delivery-platform:ci .
+
+  e2e:
+    needs: [tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: docker compose --profile test build
+      - run: docker compose up -d --wait
+      - run: docker compose --profile test run --rm test pytest -m e2e -q
+      - if: always()
+        run: docker compose down
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+        with:
+          version: "0.11.24"
+      - run: uv sync --all-groups --frozen
+      - run: uv run pip-audit
+      - run: docker build -t webhook-delivery-platform:ci .
+      - uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+      - uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: webhook-delivery-platform:ci
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true

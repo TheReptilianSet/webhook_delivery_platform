@@ -1,0 +1,177 @@
+name: webhook-delivery-platform
+
+x-app: &app
+  build:
+    context: .
+  image: webhook-delivery-platform:local
+  env_file: .env.example
+  environment:
+    WEBHOOK_PLATFORM_DATABASE_URL: ${WEBHOOK_PLATFORM_DATABASE_URL:-postgresql+asyncpg://webhook:webhook@postgres:5432/webhook}
+  init: true
+  restart: unless-stopped
+  networks: [platform]
+  deploy:
+    resources:
+      limits:
+        memory: 512M
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: webhook
+      POSTGRES_USER: webhook
+      POSTGRES_PASSWORD: webhook
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webhook -d webhook"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports: ["5432:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    networks: [platform]
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: webhook
+      RABBITMQ_DEFAULT_PASS: webhook
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    ports: ["5672:5672", "15672:15672"]
+    volumes: ["rabbitmq-data:/var/lib/rabbitmq"]
+    networks: [platform]
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["uvicorn", "webhook_platform.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["8000:8000"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=2)",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  outbox-dispatcher:
+    <<: *app
+    command: ["python", "-m", "webhook_platform.outbox_dispatcher"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  retry-scheduler:
+    <<: *app
+    command: ["python", "-m", "webhook_platform.scheduler"]
+    environment:
+      WEBHOOK_PLATFORM_DATABASE_URL: ${WEBHOOK_PLATFORM_DATABASE_URL:-postgresql+asyncpg://webhook:webhook@postgres:5432/webhook}
+      WEBHOOK_PLATFORM_RETRY_DELAYS_SECONDS: "[1,1,1,1,1]"
+      WEBHOOK_PLATFORM_RETRY_JITTER_RATIO: "0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  delivery-worker:
+    <<: *app
+    command:
+      [
+        "celery",
+        "-A",
+        "webhook_platform.worker:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=8",
+        "--without-mingle",
+        "--without-gossip",
+      ]
+    environment:
+      WEBHOOK_PLATFORM_DATABASE_URL: ${WEBHOOK_PLATFORM_DATABASE_URL:-postgresql+asyncpg://webhook:webhook@postgres:5432/webhook}
+      WEBHOOK_PLATFORM_RETRY_DELAYS_SECONDS: "[1,1,1,1,1]"
+      WEBHOOK_PLATFORM_RETRY_JITTER_RATIO: "0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      test-receiver:
+        condition: service_healthy
+
+  test-receiver:
+    build:
+      context: tools/test_receiver
+    image: webhook-test-receiver:local
+    init: true
+    ports: ["8080:8080"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2)",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    networks: [platform]
+    restart: unless-stopped
+
+  test:
+    build:
+      context: .
+      target: test
+    image: webhook-delivery-platform:test
+    working_dir: /app
+    environment:
+      WEBHOOK_PLATFORM_TEST_DATABASE_URL: postgresql+asyncpg://webhook:webhook@postgres:5432/webhook_migration_test
+      WEBHOOK_PLATFORM_TEST_BROKER_URL: amqp://webhook:webhook@rabbitmq:5672//
+      WEBHOOK_PLATFORM_RUN_COMPOSE_E2E: "1"
+      WEBHOOK_PLATFORM_LOCAL_FLOW_API_BASE: http://api:8000/api/v1
+      WEBHOOK_PLATFORM_LOCAL_FLOW_RECEIVER_BASE: http://test-receiver:8080
+    command: ["pytest"]
+    networks: [platform]
+    profiles: [test]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      test-receiver:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
+
+networks:
+  platform:
+    driver: bridge
